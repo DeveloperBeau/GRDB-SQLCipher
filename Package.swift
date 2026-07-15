@@ -38,11 +38,36 @@ if ProcessInfo.processInfo.environment["SPI_BUILDER"] == "1" {
     dependencies.append(.package(url: "https://github.com/apple/swift-docc-plugin", from: "1.0.0"))
 }
 
-// GRDB+SQLCipher: Uncomment those lines
-//dependencies.append(.package(url: "https://github.com/sqlcipher/SQLCipher.swift.git", from: "4.11.0"))
-//cSettings.append(.define("SQLITE_HAS_CODEC"))
-//swiftSettings.append(.define("SQLITE_HAS_CODEC"))
-//swiftSettings.append(.define("SQLCipher"))
+// GRDB+SQLCipher: build against the vendored SQLCipher amalgamation
+// (Sources/SQLCipher) instead of the system SQLite.
+cSettings.append(.define("SQLITE_HAS_CODEC"))
+swiftSettings.append(.define("SQLITE_HAS_CODEC"))
+swiftSettings.append(.define("SQLCipher"))
+
+// Compilation flags for the vendored SQLCipher amalgamation. The first five
+// are required by SQLCipher (see its README); the rest enable the SQLite
+// features GRDB expects from Apple's system SQLite.
+let sqlcipherCSettings: [CSetting] = [
+    // NDEBUG must be on the command line, not just defined by sqlite3.c
+    // itself: clang modules otherwise re-activate assert() after the
+    // CommonCrypto include, referencing assert-only private functions.
+    .define("NDEBUG"),
+    .define("SQLITE_HAS_CODEC"),
+    .define("SQLITE_TEMP_STORE", to: "2"),
+    .define("SQLITE_EXTRA_INIT", to: "sqlcipher_extra_init"),
+    .define("SQLITE_EXTRA_SHUTDOWN", to: "sqlcipher_extra_shutdown"),
+    .define("SQLCIPHER_CRYPTO_CC"), // CommonCrypto provider, no OpenSSL
+    .define("SQLITE_THREADSAFE", to: "2"),
+    .define("HAVE_USLEEP", to: "1"),
+    .define("SQLITE_ENABLE_API_ARMOR"),
+    .define("SQLITE_ENABLE_FTS3_PARENTHESIS"),
+    .define("SQLITE_ENABLE_FTS4"),
+    .define("SQLITE_ENABLE_FTS5"),
+    .define("SQLITE_ENABLE_MATH_FUNCTIONS"),
+    .define("SQLITE_ENABLE_RTREE"),
+    .define("SQLITE_ENABLE_SNAPSHOT"),
+    .define("SQLITE_ENABLE_STAT4"),
+]
 
 let package = Package(
     name: "GRDB",
@@ -54,30 +79,30 @@ let package = Package(
         .watchOS(.v7),
     ],
     products: [
-        // GRDB+SQLCipher: Delete the GRDBSQLite library
-        .library(name: "GRDBSQLite", targets: ["GRDBSQLite"]),
         .library(name: "GRDB", targets: ["GRDB"]),
         .library(name: "GRDB-dynamic", type: .dynamic, targets: ["GRDB"]),
     ],
     dependencies: dependencies,
     targets: [
-        // GRDB+SQLCipher: Delete the GRDBSQLite target
-        .systemLibrary(
-            name: "GRDBSQLite",
-            providers: [.apt(["libsqlite3-dev"])]),
-        // GRDB+SQLCipher: Uncomment the GRDBSQLCipher target
-        //.target(
-        //    name: "GRDBSQLCipher",
-        //    dependencies: [.product(name: "SQLCipher", package: "SQLCipher.swift")]
-        //),
+        // The SQLCipher amalgamation, generated from sqlcipher/sqlcipher
+        // sources. See README.md for the version and generation command.
+        .target(
+            name: "SQLCipher",
+            exclude: ["LICENSE.txt"],
+            cSettings: sqlcipherCSettings,
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("CoreFoundation"),
+            ]),
+        .target(
+            name: "GRDBSQLCipher",
+            dependencies: [.target(name: "SQLCipher")]
+        ),
         .target(
             name: "GRDB",
             dependencies: [
-                // GRDB+SQLCipher: Delete the GRDBSQLite dependency
-                .target(name: "GRDBSQLite"),
-                // GRDB+SQLCipher: Uncomment the SQLCipher and GRDBSQLCipher dependencies
-                //.product(name: "SQLCipher", package: "SQLCipher.swift"),
-                //.target(name: "GRDBSQLCipher"),
+                .target(name: "SQLCipher"),
+                .target(name: "GRDBSQLCipher"),
             ],
             path: "GRDB",
             resources: [.copy("PrivacyInfo.xcprivacy")],
@@ -114,6 +139,16 @@ let package = Package(
                 .swiftLanguageMode(.v5),
                 .enableUpcomingFeature("InferSendableFromCaptures"),
                 .enableUpcomingFeature("GlobalActorIsolatedTypesUsability"),
+            ]),
+        // Proofs that the SQLCipher codec is active and that GRDB works on
+        // encrypted databases. See SQLCipherProofTests/README notes.
+        .testTarget(
+            name: "SQLCipherProofTests",
+            dependencies: ["GRDB"],
+            path: "SQLCipherProofTests",
+            cSettings: cSettings,
+            swiftSettings: swiftSettings + [
+                .swiftLanguageMode(.v5),
             ])
     ],
     swiftLanguageModes: [.v6]

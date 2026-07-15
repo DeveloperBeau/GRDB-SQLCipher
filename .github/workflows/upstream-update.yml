@@ -1,0 +1,133 @@
+name: Upstream update
+
+# Weekly check for new upstream GRDB tags. When one appears, merge it into
+# an update/<tag> branch, run the SQLCipher proof tests, build the binary
+# bundle, and create a DRAFT release targeting the branch. Publishing the
+# draft (manual) is what creates the tag.
+#
+# The full upstream GRDB test suite is too slow for a weekly scan, so this
+# workflow only runs the proof suite by default. Run the full suite before
+# publishing a draft release: either trigger this workflow manually with
+# run-full-suite enabled, or run `swift test` on the update branch.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Mondays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      run-full-suite:
+        description: Also run the full upstream GRDB test suite
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  update:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select the newest installed Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Look for a newer upstream tag
+        id: upstream
+        run: |
+          git remote add upstream https://github.com/groue/GRDB.swift.git
+          git fetch --quiet --tags upstream
+          current=$(cat UPSTREAM_VERSION)
+          latest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "current: $current, latest upstream: $latest"
+          if [ "$latest" = "$current" ]; then
+            echo "Up to date."
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code origin "refs/heads/update/$latest" > /dev/null; then
+            echo "update/$latest already exists; nothing to do."
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge the upstream tag
+        id: merge
+        if: steps.upstream.outputs.update == 'true'
+        run: |
+          tag='${{ steps.upstream.outputs.tag }}'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "update/$tag"
+          if ! git merge --no-edit "$tag"; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            title="Upstream update $tag: merge conflicts"
+            if [ -z "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[]')" ]; then
+              gh issue create --title "$title" --body "Merging upstream tag \`$tag\` into \`main\` conflicts on:
+
+          \`\`\`
+          $conflicts
+          \`\`\`
+
+          Resolve manually: merge the tag into an \`update/$tag\` branch, update \`UPSTREAM_VERSION\`, run \`swift test\`, and tag \`$tag+sqlcipher.1\`."
+            fi
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$tag" > UPSTREAM_VERSION
+          git commit -am "Update UPSTREAM_VERSION to $tag"
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run the SQLCipher proof tests
+        id: tests
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          set -o pipefail
+          if ! swift test --filter SQLCipherProofTests 2>&1 | tee test.log; then
+            tag='${{ steps.upstream.outputs.tag }}'
+            summary=$(grep -E "error:|failed" test.log | head -30)
+            title="Upstream update $tag: proof tests failed"
+            if [ -z "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[]')" ]; then
+              gh issue create --title "$title" --body "The SQLCipher proof tests failed on the merge of upstream tag \`$tag\`:
+
+          \`\`\`
+          $summary
+          \`\`\`"
+            fi
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(grep -Eo "Executed [0-9]+ tests" test.log | tail -1)
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+          echo "count=${count:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Run the full upstream GRDB suite (optional)
+        if: steps.tests.outputs.passed == 'true' && inputs.run-full-suite
+        # See ci.yml for why Issue1838Tests/test_interrupted_commit is skipped.
+        run: swift test --skip "Issue1838Tests/test_interrupted_commit"
+
+      - name: Build the binary bundle
+        if: steps.tests.outputs.passed == 'true'
+        run: Scripts/build-xcframework.sh dist
+
+      - name: Push the branch and create a draft release
+        if: steps.tests.outputs.passed == 'true'
+        run: |
+          tag='${{ steps.upstream.outputs.tag }}'
+          sqlcipher=$(grep -m1 "CIPHER_VERSION_NUMBER" Sources/SQLCipher/sqlite3.c | awk '{print $3}')
+          git push origin "update/$tag"
+          gh release create "$tag+sqlcipher.1" \
+            --draft \
+            --target "update/$tag" \
+            --title "$tag+sqlcipher.1" \
+            --notes "GRDB $tag built against SQLCipher $sqlcipher (CommonCrypto provider).
+
+          Automated upstream update. Proof tests: ${{ steps.tests.outputs.count }}, 0 failures. Run the full upstream suite before publishing (see README, Versioning and updating)." \
+            dist/GRDB.xcframework.zip

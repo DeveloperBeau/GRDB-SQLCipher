@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-macos:
+    name: Tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest installed Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Run all tests (upstream GRDB suite + SQLCipher proofs)
+        # Issue1838Tests/test_interrupted_commit pins pre-3.52 SQLite
+        # behavior (an interrupt with no statement running used to abort the
+        # following commit). The vendored SQLite 3.53 changed that behavior,
+        # so the upstream expectation no longer holds. Everything else runs,
+        # including upstream's own encryption tests.
+        run: swift test --skip "Issue1838Tests/test_interrupted_commit"
+
+  test-ios:
+    name: Proof tests (iOS Simulator)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest installed Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Remove the Xcode projects so xcodebuild builds the package
+        run: rm -rf GRDB.xcodeproj GRDBCustom.xcodeproj GRDB.xcworkspace
+      - name: Run the SQLCipher proof tests on a simulator
+        # The full upstream suite already runs on macOS; the simulator job
+        # proves the iOS slice builds and the codec works there.
+        run: |
+          UDID=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices[] | .[] | select(.name | startswith("iPhone"))][0].udid')
+          xcodebuild test \
+            -scheme GRDB-Package \
+            -destination "id=$UDID" \
+            -only-testing:SQLCipherProofTests
+
+  xcframework:
+    name: Release XCFramework
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-macos, test-ios]
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest installed Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Build GRDB.xcframework
+        run: Scripts/build-xcframework.sh dist
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GRDB.xcframework.zip

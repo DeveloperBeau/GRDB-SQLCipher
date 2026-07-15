@@ -18,15 +18,11 @@ dependencies: [
 ]
 ```
 
-or track releases by version:
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", from: "0.1.0"),
-]
-```
+Prefer `exact:` over `from:` with this repository. It began as a mirror of upstream GRDB, whose historical tags (`0.x` through `v7.x`) share the version range this fork's own semver line uses — if any of those tags ever leaked to this remote, `from:` could silently resolve to an old, unencrypted GRDB. `exact:` cannot.
 
 This repository has its own semver line; every [release](https://github.com/DeveloperBeau/GRDB-SQLCipher/releases) states the packaged GRDB and SQLCipher versions in its notes.
+
+Maintainers: never run `git push origin --tags` from a clone that has fetched the upstream remote — push tags individually (`git push origin <tag>`).
 
 then add the product to your target:
 

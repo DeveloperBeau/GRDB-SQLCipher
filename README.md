@@ -10,11 +10,11 @@ The original GRDB documentation below applies as-is. Everything specific to this
 
 ## Adding the package
 
-Pin an exact release (recommended — the version scheme is `<upstream tag>+sqlcipher.<packaging revision>`, and SPM treats the metadata suffix as part of an exact pin only):
+Pin an exact release:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", exact: "7.11.1+sqlcipher.1"),
+    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", exact: "0.1.0"),
 ]
 ```
 
@@ -22,9 +22,11 @@ or track releases by version:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", from: "7.11.1"),
+    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", from: "0.1.0"),
 ]
 ```
+
+This repository has its own semver line; every [release](https://github.com/DeveloperBeau/GRDB-SQLCipher/releases) states the packaged GRDB and SQLCipher versions in its notes.
 
 then add the product to your target:
 
@@ -162,7 +164,7 @@ The old key stops working immediately. Rekeying re-encrypts pages in place; it d
 
 ## Versioning and updating
 
-Releases are tagged `<upstream tag>+sqlcipher.<n>`, e.g. `v7.11.1+sqlcipher.1`. `<n>` bumps when the packaging changes without an upstream move.
+Releases follow standard semver on this repository's own version line (`0.1.0`, `0.2.0`, ...): a **minor** bump when the packaged GRDB or SQLCipher version moves, a **patch** bump for packaging-only fixes. The `0.x.x` range signals pre-1.0 status, per usual semver semantics; the line moves to `1.0.0` when it is declared ship-ready. The packaged versions are stated in each release's notes (e.g. "GRDB 7.11.1, SQLCipher 4.17.0"); [`UPSTREAM_VERSION`](UPSTREAM_VERSION) records the packaged upstream GRDB tag and is the machine-readable source of truth.
 
 A scheduled workflow ([`.github/workflows/upstream-update.yml`](.github/workflows/upstream-update.yml)) checks weekly for new upstream GRDB tags. When one appears it merges the tag into an `update/<tag>` branch, runs the SQLCipher proof tests, builds the XCFramework, and creates a **draft** release. Publishing is manual: review the draft, run the full upstream GRDB test suite on the branch (`swift test`), merge the branch to `main`, and publish the release — publishing creates the tag.
 
@@ -171,7 +173,7 @@ Manual bump procedure (upstream moved, or SQLCipher moved):
 1. Merge the new upstream tag into `main` (the packaging diff is additive; conflicts should be rare) and update [`UPSTREAM_VERSION`](UPSTREAM_VERSION).
 2. If SQLCipher moved, regenerate the amalgamation (see below) and replace `Sources/SQLCipher/sqlite3.c` and `Sources/SQLCipher/include/SQLCipher/sqlite3.h`.
 3. Run both suites: `swift test` (the full upstream suite and the proofs).
-4. Tag `v<upstream>+sqlcipher.1` and push; CI attaches the XCFramework to the release.
+4. Tag the next minor version and push; CI attaches the binary bundle to the release. State the packaged GRDB and SQLCipher versions in the release notes.
 
 ### Regenerating the SQLCipher amalgamation
 

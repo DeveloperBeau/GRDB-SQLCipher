@@ -5,10 +5,18 @@ name: Upstream update
 # bundle, and create a DRAFT release targeting the branch. Publishing the
 # draft (manual) is what creates the tag.
 #
+# Releases follow this repository's own semver line (see README): the draft
+# proposes the next minor version (0.x+1.0), since an upstream bump is a
+# minor change; the packaged GRDB and SQLCipher versions go in the notes.
+#
 # The full upstream GRDB test suite is too slow for a weekly scan, so this
 # workflow only runs the proof suite by default. Run the full suite before
 # publishing a draft release: either trigger this workflow manually with
 # run-full-suite enabled, or run `swift test` on the update branch.
+#
+# Toolchain: this job needs xcodebuild for the binary bundle (a swift.org
+# toolchain has no iOS SDK), so it selects Xcode 26.6 explicitly and fails
+# loudly if missing. The macos-26 runner image carries Xcode 26.6.
 
 on:
   schedule:
@@ -26,7 +34,7 @@ permissions:
 
 jobs:
   update:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
@@ -35,8 +43,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Select the newest installed Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Select Xcode 26.6
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26.6*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::Xcode 26.6 not found on this runner image. Installed Xcodes:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          swift --version
 
       - name: Look for a newer upstream tag
         id: upstream
@@ -76,7 +93,7 @@ jobs:
           $conflicts
           \`\`\`
 
-          Resolve manually: merge the tag into an \`update/$tag\` branch, update \`UPSTREAM_VERSION\`, run \`swift test\`, and tag \`$tag+sqlcipher.1\`."
+          Resolve manually: merge the tag into an \`update/$tag\` branch, update \`UPSTREAM_VERSION\`, run \`swift test\`, and publish the next minor release."
             fi
             echo "merged=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -122,12 +139,20 @@ jobs:
         run: |
           tag='${{ steps.upstream.outputs.tag }}'
           sqlcipher=$(grep -m1 "CIPHER_VERSION_NUMBER" Sources/SQLCipher/sqlite3.c | awk '{print $3}')
+          latest_release=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$latest_release" ]; then
+            next="0.1.0"
+          else
+            IFS=. read -r major minor patch <<< "$latest_release"
+            next="$major.$((minor + 1)).0"
+          fi
+          echo "Proposing release $next (previous: ${latest_release:-none})"
           git push origin "update/$tag"
-          gh release create "$tag+sqlcipher.1" \
+          gh release create "$next" \
             --draft \
             --target "update/$tag" \
-            --title "$tag+sqlcipher.1" \
-            --notes "GRDB $tag built against SQLCipher $sqlcipher (CommonCrypto provider).
+            --title "$next" \
+            --notes "GRDB ${tag#v}, SQLCipher $sqlcipher (CommonCrypto provider).
 
           Automated upstream update. Proof tests: ${{ steps.tests.outputs.count }}, 0 failures. Run the full upstream suite before publishing (see README, Versioning and updating)." \
             dist/GRDB.xcframework.zip

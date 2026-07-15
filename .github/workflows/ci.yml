@@ -3,19 +3,36 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['*.*.*']
   pull_request:
     branches: [main]
+
+# Toolchain policy:
+# - Jobs that only run `swift build` / `swift test` pin the Swift toolchain
+#   with DeveloperBeau/resolve-swift (reuses a satisfying preinstalled
+#   toolchain, otherwise installs from swift.org).
+# - Jobs that need xcodebuild (iOS SDK, XCFramework) select Xcode 26.6
+#   explicitly and fail loudly if it is missing: a swift.org toolchain does
+#   not provide the iOS SDK, and silently building with the image default
+#   would hide toolchain drift. The macos-26 runner image carries Xcode 26.6
+#   (its default is 26.5).
 
 jobs:
   test-macos:
     name: Tests (macOS)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Select the newest installed Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Resolve Swift 6.3
+        id: swift
+        uses: DeveloperBeau/resolve-swift@v2
+        with:
+          swift-version: '6.3'
+      - name: Show toolchain
+        run: |
+          echo "Resolved Swift: ${{ steps.swift.outputs.version }}"
+          swift --version
       - name: Run all tests (upstream GRDB suite + SQLCipher proofs)
         # Issue1838Tests/test_interrupted_commit pins pre-3.52 SQLite
         # behavior (an interrupt with no statement running used to abort the
@@ -26,12 +43,20 @@ jobs:
 
   test-ios:
     name: Proof tests (iOS Simulator)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Select the newest installed Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Select Xcode 26.6
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26.6*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::Xcode 26.6 not found on this runner image. Installed Xcodes:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
       - name: Remove the Xcode projects so xcodebuild builds the package
         run: rm -rf GRDB.xcodeproj GRDBCustom.xcodeproj GRDB.xcworkspace
       - name: Run the SQLCipher proof tests on a simulator
@@ -47,17 +72,25 @@ jobs:
 
   xcframework:
     name: Release XCFramework
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [test-macos, test-ios]
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Select the newest installed Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
-      - name: Build GRDB.xcframework
+      - name: Select Xcode 26.6
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26.6*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::Xcode 26.6 not found on this runner image. Installed Xcodes:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+      - name: Build the binary bundle
         run: Scripts/build-xcframework.sh dist
       - name: Attach to the release
         uses: softprops/action-gh-release@v2

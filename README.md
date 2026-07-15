@@ -1,3 +1,198 @@
+# GRDB + SQLCipher
+
+This repository is a packaging fork of [GRDB.swift](https://github.com/groue/GRDB.swift) that builds GRDB against [SQLCipher Community Edition](https://www.zetetic.net/sqlcipher/) instead of the system SQLite, so your databases can be fully encrypted on disk.
+
+- **GRDB v7.11.1** (see [`UPSTREAM_VERSION`](UPSTREAM_VERSION)) + **SQLCipher 4.17.0** (SQLite 3.53.3), CommonCrypto provider — no OpenSSL.
+- **Packaging-only diff.** No GRDB Swift source is modified. GRDB already contains all SQLCipher code paths behind compile-time flags; this fork only adds the vendored SQLCipher amalgamation and wires up `Package.swift`, which keeps rebases onto new upstream tags mechanical.
+- **Drop-in.** The module is still named `GRDB`. Existing `import GRDB` code compiles unchanged; encryption is opt-in per database.
+
+The original GRDB documentation below applies as-is. Everything specific to this fork is in this section.
+
+## Adding the package
+
+Pin an exact release (recommended — the version scheme is `<upstream tag>+sqlcipher.<packaging revision>`, and SPM treats the metadata suffix as part of an exact pin only):
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", exact: "7.11.1+sqlcipher.1"),
+]
+```
+
+or track releases by version:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/DeveloperBeau/GRDB-SQLCipher.git", from: "7.11.1"),
+]
+```
+
+then add the product to your target:
+
+```swift
+.target(name: "MyApp", dependencies: [
+    .product(name: "GRDB", package: "GRDB-SQLCipher"),
+])
+```
+
+Not using SPM? Every [release](https://github.com/DeveloperBeau/GRDB-SQLCipher/releases) attaches a prebuilt binary bundle (iOS device + simulator, macOS). It contains three XCFrameworks: `GRDB.xcframework` plus the header-only companions `SQLCipher.xcframework` and `GRDBSQLCipher.xcframework` (GRDB's Swift interface imports those two modules; the actual code is all inside `GRDB.framework`). Drag all three into your Xcode target.
+
+Do **not** link the system SQLite or another SQLite build (including another SQLCipher copy) into the same process. Duplicate SQLite symbols cause subtle, hard-to-debug failures.
+
+## Turning encryption on
+
+Give GRDB the passphrase in `Configuration.prepareDatabase`, before any other database access:
+
+```swift
+import GRDB
+
+var config = Configuration()
+config.prepareDatabase { db in
+    try db.usePassphrase(key) // key: String or Data
+}
+
+// Works with both DatabaseQueue and DatabasePool (WAL):
+let dbQueue = try DatabaseQueue(path: databasePath, configuration: config)
+let dbPool = try DatabasePool(path: databasePath, configuration: config)
+```
+
+Optional tuning, also in `prepareDatabase`, right after `usePassphrase`:
+
+```swift
+config.prepareDatabase { db in
+    try db.usePassphrase(key)
+    // Page size of the encrypted database. 4096 is the SQLCipher default
+    // and a good fit for iOS/macOS; set it explicitly if you need a
+    // different trade-off between I/O granularity and space overhead.
+    try db.execute(sql: "PRAGMA cipher_page_size = 4096")
+    // Overwrite deleted content with zeros. SQLCipher turns this on by
+    // default for encrypted databases; keeping it explicit documents that
+    // deleted rows do not linger inside the file.
+    try db.execute(sql: "PRAGMA secure_delete = ON")
+}
+```
+
+A database opened **without** a passphrase behaves as plain, unencrypted SQLite — the codec only engages when a key is provided. That is what makes this package a safe drop-in: existing unencrypted databases keep working until you decide to migrate them (see below).
+
+## Key management
+
+Generate a strong random key once, store it in the keychain, and read it back at launch:
+
+```swift
+import Security
+
+func loadOrCreateDatabaseKey() throws -> Data {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "com.example.myapp.database-key",
+        kSecReturnData as String: true,
+    ]
+    var result: AnyObject?
+    if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+       let key = result as? Data {
+        return key
+    }
+    var key = Data(count: 32)
+    _ = key.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+    let attributes: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "com.example.myapp.database-key",
+        kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        kSecValueData as String: key,
+    ]
+    SecItemAdd(attributes as CFDictionary, nil)
+    return key
+}
+```
+
+Ground rules:
+
+- **Losing the key means losing the database.** There is no recovery. Either treat the database as rebuildable from your backend, or back the key up somewhere as durable as the data.
+- Never hardcode the key in source, a plist, or user defaults.
+- Never log the key, and keep it out of analytics and crash reports.
+- Pick a keychain accessibility class deliberately: if your app touches the database from a background launch, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` is usually right.
+
+## Verifying it works
+
+Two lines tell you the cipher is present:
+
+```swift
+let cipherVersion = try dbQueue.read { db in
+    try String.fetchOne(db, sql: "PRAGMA cipher_version") // e.g. "4.17.0"
+}
+```
+
+`nil` means the codec is not compiled in (you are linking plain SQLite). To confirm a file on disk is actually encrypted, check that it does *not* start with the plaintext SQLite magic:
+
+```swift
+let header = try Data(contentsOf: URL(fileURLWithPath: databasePath)).prefix(16)
+let isPlaintext = header == Data("SQLite format 3\0".utf8)
+```
+
+The `SQLCipherProofTests` target in this repository runs exactly these checks (plus wrong-key, no-key, and rekey enforcement) on every CI build.
+
+## Migrating an existing plaintext database
+
+If you shipped unencrypted and adopt encryption later, convert the file once with `sqlcipher_export`:
+
+```swift
+// 1. Open the existing plaintext database (no passphrase).
+let plainQueue = try DatabaseQueue(path: plainPath)
+try plainQueue.inDatabase { db in
+    // 2. Attach a new, encrypted database and copy everything into it.
+    try db.execute(literal: "ATTACH DATABASE \(encryptedPath) AS encrypted KEY \(key)")
+    try db.execute(sql: "SELECT sqlcipher_export('encrypted')")
+    try db.execute(sql: "DETACH DATABASE encrypted")
+}
+// 3. Swap the files, then delete the plaintext original.
+```
+
+Delete the plaintext file (and its `-wal`/`-shm` companions) only after the encrypted copy is verified openable with the key.
+
+## Rekeying
+
+To change the passphrase of an existing encrypted database:
+
+```swift
+try dbQueue.write { db in
+    try db.changePassphrase(newKey)
+}
+```
+
+The old key stops working immediately. Rekeying re-encrypts pages in place; it does not rewrite the whole file, so it is fast even for large databases.
+
+## Versioning and updating
+
+Releases are tagged `<upstream tag>+sqlcipher.<n>`, e.g. `v7.11.1+sqlcipher.1`. `<n>` bumps when the packaging changes without an upstream move.
+
+A scheduled workflow ([`.github/workflows/upstream-update.yml`](.github/workflows/upstream-update.yml)) checks weekly for new upstream GRDB tags. When one appears it merges the tag into an `update/<tag>` branch, runs the SQLCipher proof tests, builds the XCFramework, and creates a **draft** release. Publishing is manual: review the draft, run the full upstream GRDB test suite on the branch (`swift test`), merge the branch to `main`, and publish the release — publishing creates the tag.
+
+Manual bump procedure (upstream moved, or SQLCipher moved):
+
+1. Merge the new upstream tag into `main` (the packaging diff is additive; conflicts should be rare) and update [`UPSTREAM_VERSION`](UPSTREAM_VERSION).
+2. If SQLCipher moved, regenerate the amalgamation (see below) and replace `Sources/SQLCipher/sqlite3.c` and `Sources/SQLCipher/include/SQLCipher/sqlite3.h`.
+3. Run both suites: `swift test` (the full upstream suite and the proofs).
+4. Tag `v<upstream>+sqlcipher.1` and push; CI attaches the XCFramework to the release.
+
+### Regenerating the SQLCipher amalgamation
+
+The vendored amalgamation was generated from [sqlcipher/sqlcipher](https://github.com/sqlcipher/sqlcipher) at tag `v4.17.0`:
+
+```sh
+git clone https://github.com/sqlcipher/sqlcipher.git && cd sqlcipher
+git checkout v4.17.0
+./configure --with-tempstore=yes CFLAGS="-DSQLITE_HAS_CODEC"
+make sqlite3.c
+```
+
+`sqlite3.c` and `sqlite3.h` are copied verbatim into `Sources/SQLCipher/`. All compilation flags live in `Package.swift` (`sqlcipherCSettings`): the SQLCipher-required set (`SQLITE_HAS_CODEC`, `SQLITE_TEMP_STORE=2`, `SQLITE_EXTRA_INIT=sqlcipher_extra_init`, `SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown`, `SQLCIPHER_CRYPTO_CC`, `SQLITE_THREADSAFE=2`) plus the SQLite features GRDB expects (`FTS3/4/5`, `RTREE`, `SNAPSHOT`, `STAT4`, math functions, API armor).
+
+## Licences
+
+- GRDB is distributed under the [MIT licence](LICENSE) (unchanged).
+- SQLCipher Community Edition is distributed under a BSD-style licence; the text ships alongside the vendored code in [`Sources/SQLCipher/LICENSE.txt`](Sources/SQLCipher/LICENSE.txt).
+
+---
+
 <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/groue/GRDB.swift/master/GRDB~dark.png">
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/groue/GRDB.swift/master/GRDB.png">

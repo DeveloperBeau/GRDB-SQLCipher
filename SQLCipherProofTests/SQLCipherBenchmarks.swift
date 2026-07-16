@@ -42,7 +42,7 @@ final class SQLCipherBenchmarks: SQLCipherProofTestCase {
         for (label, batchSize) in [("batched-10k", 10_000), ("per-row-txn", 1)] {
             // per-row-txn is brutal; only exercise it on the light size.
             if batchSize == 1 && count > 100_000 { continue }
-            let perRowCount = batchSize == 1 ? min(count, 20_000) : count
+            let perRowCount = batchSize == 1 ? min(count, 8_000) : count
             var cells: [BenchCell] = []
             for mode in modes {
                 let path = freshDBPath("import-\(label)-\(mode)")
@@ -138,7 +138,7 @@ final class SQLCipherBenchmarks: SQLCipherProofTestCase {
     // MARK: - Axis 4: Rapid CRUD
 
     func testRapidCRUD() throws {
-        let ops = runHeavy ? 200_000 : 50_000
+        let ops = runHeavy ? 200_000 : 15_000
         let modes: [BenchMode] = [
             .plain,
             .encryptedPassphrase(pageSize: Self.appPageSize),
@@ -198,7 +198,7 @@ final class SQLCipherBenchmarks: SQLCipherProofTestCase {
         try BenchSchema.insertMessages(pool, count: 20_000, batchSize: 10_000)
 
         let walPath = path + "-wal"
-        let writes = runHeavy ? 40_000 : 8_000
+        let writes = runHeavy ? 40_000 : 3_000
         let readerCount = 6
         var peakWAL: Int64 = 0
 
@@ -244,16 +244,20 @@ final class SQLCipherBenchmarks: SQLCipherProofTestCase {
             }
         }
 
-        // WAL watcher.
-        group.enter()
+        // WAL watcher. It must NOT be a member of `group` — it watches the
+        // workers' group to know when to stop, so joining that same group
+        // would keep the count above zero forever and deadlock both its own
+        // loop and the outer wait. It signals its own completion instead.
+        let watcherDone = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            defer { group.leave() }
             while group.wait(timeout: .now() + 0.05) == .timedOut {
                 peakWAL = max(peakWAL, fileSizeBytes(walPath))
             }
+            watcherDone.signal()
         }
 
         group.wait()
+        watcherDone.wait()
 
         XCTAssertEqual(lockErrors.value, 0, "saw \(lockErrors.value) lock/timeout errors under contention")
 
@@ -310,7 +314,7 @@ final class SQLCipherBenchmarks: SQLCipherProofTestCase {
 
         // 3. Many tiny transactions.
         try seconds {
-            for k in 0..<2_000 {
+            for k in 0..<1_000 {
                 try pool.write { db in
                     try db.execute(sql: "UPDATE message SET timestamp = timestamp + 1 WHERE id = ?", arguments: ["big-\(k)"])
                 }

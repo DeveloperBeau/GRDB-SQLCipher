@@ -1,9 +1,9 @@
 # GRDB + SQLCipher
 
-This repository is a packaging fork of [GRDB.swift](https://github.com/groue/GRDB.swift) that builds GRDB against [SQLCipher Community Edition](https://www.zetetic.net/sqlcipher/) instead of the system SQLite, so your databases can be fully encrypted on disk.
+This repository is a packaging fork of [GRDB.swift](https://github.com/groue/GRDB.swift) that builds GRDB against [SQLCipher Community Edition](https://www.zetetic.net/sqlcipher/) instead of the system SQLite, so your databases can be encrypted on disk.
 
-- **GRDB v7.11.1** (see [`UPSTREAM_VERSION`](UPSTREAM_VERSION)) + **SQLCipher 4.17.0** (SQLite 3.53.3), CommonCrypto provider — no OpenSSL.
-- **Packaging-only diff.** No GRDB Swift source is modified. GRDB already contains all SQLCipher code paths behind compile-time flags; this fork only adds the vendored SQLCipher amalgamation and wires up `Package.swift`, which keeps rebases onto new upstream tags mechanical.
+- **GRDB v7.11.1** (see [`UPSTREAM_VERSION`](UPSTREAM_VERSION)) + **SQLCipher 4.17.0** (SQLite 3.53.3), CommonCrypto provider; no OpenSSL dependency.
+- **Packaging-only diff.** The fork modifies no GRDB Swift source. GRDB already contains all SQLCipher code paths behind compile-time flags; the diff adds the vendored SQLCipher amalgamation and wires up `Package.swift`, which keeps rebases onto new upstream tags mechanical.
 - **Drop-in.** The module is still named `GRDB`. Existing `import GRDB` code compiles unchanged; encryption is opt-in per database.
 
 The original GRDB documentation below applies as-is. Everything specific to this fork is in this section.
@@ -18,11 +18,11 @@ dependencies: [
 ]
 ```
 
-Prefer `exact:` over `from:` with this repository. It began as a mirror of upstream GRDB, whose historical tags (`0.x` through `v7.x`) share the version range this fork's own semver line uses — if any of those tags ever leaked to this remote, `from:` could silently resolve to an old, unencrypted GRDB. `exact:` cannot.
+Prefer `exact:` over `from:` with this repository. It began as a mirror of upstream GRDB, whose historical tags (`0.x` through `v7.x`) share the version range this fork's own semver line uses. If one of those tags leaked to this remote, `from:` could resolve to an old, unencrypted GRDB without a warning. `exact:` cannot.
 
 This repository has its own semver line; every [release](https://github.com/DeveloperBeau/GRDB-SQLCipher/releases) states the packaged GRDB and SQLCipher versions in its notes.
 
-Maintainers: never run `git push origin --tags` from a clone that has fetched the upstream remote — push tags individually (`git push origin <tag>`).
+Maintainers: never run `git push origin --tags` from a clone that has fetched the upstream remote; push tags individually (`git push origin <tag>`).
 
 then add the product to your target:
 
@@ -32,7 +32,7 @@ then add the product to your target:
 ])
 ```
 
-Not using SPM? Every [release](https://github.com/DeveloperBeau/GRDB-SQLCipher/releases) attaches a prebuilt binary bundle (iOS device + simulator, macOS). It contains three XCFrameworks: `GRDB.xcframework` plus the header-only companions `SQLCipher.xcframework` and `GRDBSQLCipher.xcframework` (GRDB's Swift interface imports those two modules; the actual code is all inside `GRDB.framework`). Drag all three into your Xcode target.
+Not using SPM? Every [release](https://github.com/DeveloperBeau/GRDB-SQLCipher/releases) attaches a prebuilt binary bundle (iOS device + simulator, macOS). It contains three XCFrameworks: `GRDB.xcframework` plus the header-only companions `SQLCipher.xcframework` and `GRDBSQLCipher.xcframework` (GRDB's Swift interface imports those two modules; all the code lives in `GRDB.framework`). Drag all three into your Xcode target.
 
 Do **not** link the system SQLite or another SQLite build (including another SQLCipher copy) into the same process. Duplicate SQLite symbols cause subtle, hard-to-debug failures.
 
@@ -69,7 +69,7 @@ config.prepareDatabase { db in
 }
 ```
 
-A database opened **without** a passphrase behaves as plain, unencrypted SQLite — the codec only engages when a key is provided. That is what makes this package a safe drop-in: existing unencrypted databases keep working until you decide to migrate them (see below).
+A database opened **without** a passphrase behaves as plain, unencrypted SQLite: the codec engages only when you supply a key. That makes this package a safe drop-in; existing unencrypted databases keep working until you decide to migrate them (see below).
 
 ## Key management
 
@@ -107,11 +107,11 @@ Ground rules:
 - **Losing the key means losing the database.** There is no recovery. Either treat the database as rebuildable from your backend, or back the key up somewhere as durable as the data.
 - Never hardcode the key in source, a plist, or user defaults.
 - Never log the key, and keep it out of analytics and crash reports.
-- Pick a keychain accessibility class deliberately: if your app touches the database from a background launch, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` is usually right.
+- Pick the keychain accessibility class to match how the app runs: if it touches the database from a background launch, use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
 
 ## Verifying it works
 
-Two lines tell you the cipher is present:
+Confirm the cipher is present with two lines:
 
 ```swift
 let cipherVersion = try dbQueue.read { db in
@@ -119,14 +119,14 @@ let cipherVersion = try dbQueue.read { db in
 }
 ```
 
-`nil` means the codec is not compiled in (you are linking plain SQLite). To confirm a file on disk is actually encrypted, check that it does *not* start with the plaintext SQLite magic:
+`nil` means the codec is not compiled in (you are linking plain SQLite). To confirm a file on disk is encrypted, check that it does *not* start with the plaintext SQLite magic:
 
 ```swift
 let header = try Data(contentsOf: URL(fileURLWithPath: databasePath)).prefix(16)
 let isPlaintext = header == Data("SQLite format 3\0".utf8)
 ```
 
-The `SQLCipherProofTests` target in this repository runs exactly these checks (plus wrong-key, no-key, and rekey enforcement) on every CI build.
+The `SQLCipherProofTests` target in this repository runs these same checks (plus wrong-key, no-key, and rekey enforcement) on every CI build.
 
 ## Migrating an existing plaintext database
 
@@ -144,7 +144,7 @@ try plainQueue.inDatabase { db in
 // 3. Swap the files, then delete the plaintext original.
 ```
 
-Delete the plaintext file (and its `-wal`/`-shm` companions) only after the encrypted copy is verified openable with the key.
+Delete the plaintext file (and its `-wal`/`-shm` companions) only after you have verified the encrypted copy opens with the key.
 
 ## Rekeying
 
@@ -156,13 +156,13 @@ try dbQueue.write { db in
 }
 ```
 
-The old key stops working immediately. Rekeying re-encrypts pages in place; it does not rewrite the whole file, so it is fast even for large databases.
+The old key stops working the moment `changePassphrase` returns. Rekeying re-encrypts pages in place; it does not rewrite the whole file, so it is fast even for large databases.
 
 ## Versioning and updating
 
-Releases follow standard semver on this repository's own version line (`0.1.0`, `0.2.0`, ...): a **minor** bump when the packaged GRDB or SQLCipher version moves, a **patch** bump for packaging-only fixes. The `0.x.x` range signals pre-1.0 status, per usual semver semantics; the line moves to `1.0.0` when it is declared ship-ready. The packaged versions are stated in each release's notes (e.g. "GRDB 7.11.1, SQLCipher 4.17.0"); [`UPSTREAM_VERSION`](UPSTREAM_VERSION) records the packaged upstream GRDB tag and is the machine-readable source of truth.
+Releases follow standard semver on this repository's own version line (`0.1.0`, `0.2.0`, ...): a **minor** bump when the packaged GRDB or SQLCipher version moves, a **patch** bump for packaging-only fixes. The `0.x.x` range signals pre-1.0 status, per usual semver semantics; the line moves to `1.0.0` once it is ready to ship. Each release's notes state the packaged versions (e.g. "GRDB 7.11.1, SQLCipher 4.17.0"); [`UPSTREAM_VERSION`](UPSTREAM_VERSION) records the packaged upstream GRDB tag and is the machine-readable source of truth.
 
-A scheduled workflow ([`.github/workflows/upstream-update.yml`](.github/workflows/upstream-update.yml)) checks weekly for new upstream GRDB tags. When one appears it merges the tag into an `update/<tag>` branch, runs the SQLCipher proof tests, builds the XCFramework, and creates a **draft** release. Publishing is manual: review the draft, run the full upstream GRDB test suite on the branch (`swift test`), merge the branch to `main`, and publish the release — publishing creates the tag.
+A scheduled workflow ([`.github/workflows/upstream-update.yml`](.github/workflows/upstream-update.yml)) checks weekly for new upstream GRDB tags. When one appears it merges the tag into an `update/<tag>` branch, runs the SQLCipher proof tests, builds the XCFramework, and creates a **draft** release. Publishing is manual: review the draft, run the full upstream GRDB test suite on the branch (`swift test`), merge the branch to `main`, and publish the release; publishing creates the tag.
 
 Manual bump procedure (upstream moved, or SQLCipher moved):
 
@@ -173,7 +173,7 @@ Manual bump procedure (upstream moved, or SQLCipher moved):
 
 ### Regenerating the SQLCipher amalgamation
 
-The vendored amalgamation was generated from [sqlcipher/sqlcipher](https://github.com/sqlcipher/sqlcipher) at tag `v4.17.0`:
+The vendored amalgamation comes from [sqlcipher/sqlcipher](https://github.com/sqlcipher/sqlcipher) at tag `v4.17.0`:
 
 ```sh
 git clone https://github.com/sqlcipher/sqlcipher.git && cd sqlcipher
@@ -182,12 +182,12 @@ git checkout v4.17.0
 make sqlite3.c
 ```
 
-`sqlite3.c` and `sqlite3.h` are copied verbatim into `Sources/SQLCipher/`. All compilation flags live in `Package.swift` (`sqlcipherCSettings`): the SQLCipher-required set (`SQLITE_HAS_CODEC`, `SQLITE_TEMP_STORE=2`, `SQLITE_EXTRA_INIT=sqlcipher_extra_init`, `SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown`, `SQLCIPHER_CRYPTO_CC`, `SQLITE_THREADSAFE=2`) plus the SQLite features GRDB expects (`FTS3/4/5`, `RTREE`, `SNAPSHOT`, `STAT4`, math functions, API armor).
+Copy `sqlite3.c` and `sqlite3.h` verbatim into `Sources/SQLCipher/`. All compilation flags live in `Package.swift` (`sqlcipherCSettings`): the SQLCipher-required set (`SQLITE_HAS_CODEC`, `SQLITE_TEMP_STORE=2`, `SQLITE_EXTRA_INIT=sqlcipher_extra_init`, `SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown`, `SQLCIPHER_CRYPTO_CC`, `SQLITE_THREADSAFE=2`) plus the SQLite features GRDB expects (`FTS3/4/5`, `RTREE`, `SNAPSHOT`, `STAT4`, math functions, API armor).
 
 ## Licences
 
-- GRDB is distributed under the [MIT licence](LICENSE) (unchanged).
-- SQLCipher Community Edition is distributed under a BSD-style licence; the text ships alongside the vendored code in [`Sources/SQLCipher/LICENSE.txt`](Sources/SQLCipher/LICENSE.txt).
+- GRDB ships under the [MIT licence](LICENSE) (unchanged).
+- SQLCipher Community Edition ships under a BSD-style licence; the text sits alongside the vendored code in [`Sources/SQLCipher/LICENSE.txt`](Sources/SQLCipher/LICENSE.txt).
 
 ---
 
